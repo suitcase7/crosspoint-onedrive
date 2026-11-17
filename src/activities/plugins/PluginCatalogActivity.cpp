@@ -947,6 +947,12 @@ bool PluginCatalogActivity::parseXmlList() {
   return true;
 }
 
+void PluginCatalogActivity::turnPage(const int direction) {
+  if (!canTurnPage(direction)) return;
+  beginLoading();
+  fetchPage(page + (direction > 0 ? 1 : -1));
+}
+
 bool PluginCatalogActivity::prevRowVisible() const {
   return state == State::BROWSING && !manifest.isXmlList() && page > 1;
 }

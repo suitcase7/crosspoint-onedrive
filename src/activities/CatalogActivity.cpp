@@ -139,8 +139,36 @@ bool CatalogActivity::handleCustomInput() {
 
 void CatalogActivity::navigateButtons() {
   const int before = nav.selected;
-  UiListActivity::navigateButtons();
+  if (!mappedInput.isPressed(MappedInputManager::Button::NavNext) &&
+      !mappedInput.isPressed(MappedInputManager::Button::NavPrevious)) {
+    pageHoldUsed = false;
+  }
+  if (state == State::BROWSING && (canTurnPage(1) || canTurnPage(-1))) {
+    // A press still moves one row; a hold turns the page.
+    ButtonNavigator::onNextPress(
+        [this] { moveSelectionTo(ButtonNavigator::nextIndex(activeNav().selected, listCount())); });
+    ButtonNavigator::onPreviousPress(
+        [this] { moveSelectionTo(ButtonNavigator::previousIndex(activeNav().selected, listCount())); });
+    buttonNavigator.onNextContinuous([this] { holdNavigate(1); });
+    buttonNavigator.onPreviousContinuous([this] { holdNavigate(-1); });
+  } else {
+    UiListActivity::navigateButtons();
+  }
   if (nav.selected != before) searchPending = false;
+}
+
+void CatalogActivity::holdNavigate(const int direction) {
+  if (canTurnPage(direction)) {
+    if (pageHoldUsed) return;  // one page per hold: release to turn again
+    pageHoldUsed = true;
+    searchPending = false;  // a hold on the top row turns back, it doesn't open search
+    turnPage(direction);
+    return;
+  }
+  // No page that way (first/last page): scroll rows as before.
+  const auto& n = activeNav();
+  moveSelectionTo(direction > 0 ? ButtonNavigator::nextPageIndex(n.selected, listCount(), n.inputPageRows())
+                                : ButtonNavigator::previousPageIndex(n.selected, listCount(), n.inputPageRows()));
 }
 
 void CatalogActivity::beginDownload(const std::string& title) {

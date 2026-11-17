@@ -222,6 +222,8 @@ class PluginCatalogActivity final : public CatalogActivity {
   // JSON pagination adds rows before/after the current items.
   bool prevRowVisible() const;
   bool nextRowVisible() const;
+  bool canTurnPage(int direction) const override { return direction > 0 ? nextRowVisible() : prevRowVisible(); }
+  void turnPage(int direction) override;
   // Zero outside list states disables the base list protocol.
   int rowCount() const;
   int listCount() const override { return rowCount(); }

@@ -45,6 +45,10 @@ class CatalogActivity : public UiListActivity {
   virtual void wifiSelectionCancelled();
   // Initial keyboard text when search opens (refining the active query).
   virtual std::string searchPrefill() const { return {}; }
+  // Paged catalogs: holding NavNext/NavPrevious turns to the next/previous
+  // page (once per hold) instead of scrolling rows. +1 = next, -1 = previous.
+  virtual bool canTurnPage(int /*direction*/) const { return false; }
+  virtual void turnPage(int /*direction*/) {}
 
   bool handleCustomInput() override;
   void navigateButtons() override;
@@ -81,6 +85,8 @@ class CatalogActivity : public UiListActivity {
   // Download input consumes home gestures before ActivityManager sees them.
   bool goHomeAfterCancel = false;
   bool searchPending = false;  // NavPrevious pressed on a searchable top row
+  bool pageHoldUsed = false;   // this hold already turned a page
+  void holdNavigate(int direction);
   int lastRenderedPercent = -1;
   unsigned long lastProgressUpdateMs = 0;
 };
