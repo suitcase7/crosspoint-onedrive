@@ -1,6 +1,7 @@
 #pragma once
 #include <WString.h>
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +15,9 @@ std::string normalisePath(const std::string& path);
 // Numeric-aware, case-insensitive comparison ("2" < "10"). Returns true when str1 orders
 // before str2. Same ordering sortFileList applies within the file/directory groups.
 bool naturalLess(const std::string& str1, const std::string& str2);
+// Folders first (natural A-Z), then files newest first by `mtimes` (parallel to `strs`,
+// FAT-packed date<<16|time; 0 = unknown sorts last), ties by name. Reorders both vectors.
+void sortFileListNewestFirst(std::vector<std::string>& strs, std::vector<uint32_t>& mtimes);
 
 void sortFileList(std::vector<std::string>& strs);
 

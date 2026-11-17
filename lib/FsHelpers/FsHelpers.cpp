@@ -140,6 +140,27 @@ void sortFileList(std::vector<std::string>& strs) {
   });
 }
 
+void sortFileListNewestFirst(std::vector<std::string>& strs, std::vector<uint32_t>& mtimes) {
+  if (mtimes.size() != strs.size()) {
+    sortFileList(strs);
+    return;
+  }
+  std::vector<uint16_t> order(strs.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = static_cast<uint16_t>(i);
+  std::sort(order.begin(), order.end(), [&](const uint16_t a, const uint16_t b) {
+    const bool isDirA = strs[a].back() == '/';
+    const bool isDirB = strs[b].back() == '/';
+    if (isDirA != isDirB) return isDirA;
+    if (!isDirA && mtimes[a] != mtimes[b]) return mtimes[a] > mtimes[b];
+    return naturalLess(strs[a], strs[b]);
+  });
+  std::vector<std::string> sorted;
+  sorted.reserve(strs.size());
+  for (const uint16_t i : order) sorted.push_back(std::move(strs[i]));
+  strs.swap(sorted);
+  mtimes.clear();
+}
+
 bool checkFileExtension(std::string_view fileName, const char* extension) {
   const size_t extLen = strlen(extension);
   if (fileName.length() < extLen) {

@@ -77,3 +77,20 @@ TEST(SanitizePathComponentForFat32, DoesNotSplitLetterAtBufferLimit) {
 }
 
 }  // namespace
+
+TEST(FsHelpersSort, NewestFirstKeepsFoldersFirstAndSortsFilesByTime) {
+  std::vector<std::string> files = {"b.epub", "Zfolder/", "a.epub", "c.epub", "Afolder/"};
+  std::vector<uint32_t> mtimes = {200, 999, 100, 300, 5};
+  FsHelpers::sortFileListNewestFirst(files, mtimes);
+  const std::vector<std::string> expected = {"Afolder/", "Zfolder/", "c.epub", "b.epub", "a.epub"};
+  EXPECT_EQ(files, expected);
+  EXPECT_TRUE(mtimes.empty());
+}
+
+TEST(FsHelpersSort, NewestFirstUnknownTimesLastAndTiesByName) {
+  std::vector<std::string> files = {"b.epub", "a.epub", "x.epub"};
+  std::vector<uint32_t> mtimes = {0, 50, 50};
+  FsHelpers::sortFileListNewestFirst(files, mtimes);
+  const std::vector<std::string> expected = {"a.epub", "x.epub", "b.epub"};
+  EXPECT_EQ(files, expected);
+}

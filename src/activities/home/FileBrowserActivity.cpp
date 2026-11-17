@@ -113,6 +113,10 @@ void FileBrowserActivity::loadFiles() {
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) ++entryCount;
   root.rewindDirectory();
   files.reserve(entryCount);
+  // Newest-first needs each entry's modification time, kept parallel to `files` until sorted.
+  const bool newestFirst = mode == Mode::Books && SETTINGS.fileBrowserNewestFirst;
+  std::vector<uint32_t> mtimes;
+  if (newestFirst) mtimes.reserve(entryCount);
 
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
     file.getName(fileNameBuffer.get(), NAME_BUFFER_SIZE);
@@ -122,6 +126,7 @@ void FileBrowserActivity::loadFiles() {
       continue;
     }
 
+    const size_t before = files.size();
     if (isDirectory) {
       files.emplace_back(std::string(fileNameBuffer.get()) + "/");
     } else {
@@ -136,9 +141,14 @@ void FileBrowserActivity::loadFiles() {
         files.emplace_back(filename);
       }
     }
+    if (newestFirst && files.size() != before) mtimes.push_back(file.modificationTime());
   }
   root.close();
-  FsHelpers::sortFileList(files);
+  if (newestFirst) {
+    FsHelpers::sortFileListNewestFirst(files, mtimes);
+  } else {
+    FsHelpers::sortFileList(files);
+  }
 }
 
 // fui::ListProps::rowProvider — formats row `index` from files[index] into the
@@ -388,18 +398,41 @@ void FileBrowserActivity::showEntryActions() {
   }
 
   const bool isDirectory = files[nav.selected].back() == '/';
-  static constexpr StrId FILE_OPTIONS[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_RENAME};
-  static constexpr StrId DIRECTORY_OPTIONS[] = {StrId::STR_OPEN, StrId::STR_DELETE};
-  optionPopup.show(StrId::STR_FILENAME, isDirectory ? DIRECTORY_OPTIONS : FILE_OPTIONS, isDirectory ? 2 : 3, 0,
-                   [this](const int index) {
-                     if (index == 0) {
-                       activateSelected();
-                     } else if (index == 1) {
-                       deleteSelected();
-                     } else if (index == 2) {
-                       startRename();
-                     }
-                   });
+  // The last option flips the folder's sort order (offering the one not in use).
+  static constexpr StrId FILE_OPTIONS_AZ[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_RENAME,
+                                              StrId::STR_SORT_NEWEST_FIRST};
+  static constexpr StrId FILE_OPTIONS_NEWEST[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_RENAME,
+                                                  StrId::STR_SORT_A_Z};
+  static constexpr StrId DIRECTORY_OPTIONS_AZ[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_SORT_NEWEST_FIRST};
+  static constexpr StrId DIRECTORY_OPTIONS_NEWEST[] = {StrId::STR_OPEN, StrId::STR_DELETE, StrId::STR_SORT_A_Z};
+  const bool newest = SETTINGS.fileBrowserNewestFirst;
+  const StrId* options = isDirectory ? (newest ? DIRECTORY_OPTIONS_NEWEST : DIRECTORY_OPTIONS_AZ)
+                                     : (newest ? FILE_OPTIONS_NEWEST : FILE_OPTIONS_AZ);
+  const int count = isDirectory ? 3 : 4;
+  const int sortIndex = count - 1;
+  optionPopup.show(StrId::STR_FILENAME, options, count, 0, [this, isDirectory, sortIndex](const int index) {
+    if (index == 0) {
+      activateSelected();
+    } else if (index == 1) {
+      deleteSelected();
+    } else if (index == sortIndex) {
+      toggleSortOrder();
+    } else if (!isDirectory && index == 2) {
+      startRename();
+    }
+  });
+  requestUpdate();
+}
+
+void FileBrowserActivity::toggleSortOrder() {
+  SETTINGS.fileBrowserNewestFirst = SETTINGS.fileBrowserNewestFirst ? 0 : 1;
+  SETTINGS.saveToFile();
+  {
+    RenderLock lock(*this);
+    loadFiles();
+    nav.selected = 0;
+    nav.top = 0;
+  }
   requestUpdate();
 }
 
