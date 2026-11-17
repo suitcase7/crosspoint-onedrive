@@ -15,7 +15,9 @@
 #include "network/WifiPowerSaveGuard.h"
 
 namespace {
-constexpr size_t MAX_TOKEN_FILE_SIZE = 2 * 1024;
+// OAuth providers issue large tokens (a Microsoft access token is ~1.5KB, and
+// its refresh token rides in the same file), so 2KB was too tight.
+constexpr size_t MAX_TOKEN_FILE_SIZE = 8 * 1024;
 
 // Resolves the caller's reused TLS session (or `tmp`) into a configured,
 // connected client, or nullptr if begin() or the connection failed.
@@ -171,16 +173,29 @@ bool loadTokenFromFile(const std::string& file, const std::string& path, std::st
 }
 
 bool saveTokenToFile(const std::string& file, const std::string& path, const std::string& value) {
+  return saveTokensToFile(file, {{path, value}});
+}
+
+bool saveTokensToFile(const std::string& file, const std::vector<std::pair<std::string, std::string>>& values) {
   if (file.empty()) return false;
   if (!allowedFile(file)) return false;
   JsonDocument doc;
-  // Build the nesting the read path expects (numeric segments unsupported).
+  JsonObject root = doc.to<JsonObject>();
   std::vector<std::string> segs;
-  splitPath(path, segs);
-  if (segs.empty()) return false;
-  JsonVariant node = doc.to<JsonObject>();
-  for (size_t i = 0; i + 1 < segs.size(); i++) node = node[segs[i]].to<JsonObject>();
-  node[segs.back()] = value;
+  bool wrote = false;
+  for (const auto& pathValue : values) {
+    // Build the nesting the read path expects (numeric segments unsupported).
+    splitPath(pathValue.first, segs);
+    if (segs.empty()) continue;
+    JsonObject node = root;
+    for (size_t i = 0; i + 1 < segs.size(); i++) {
+      JsonObject child = node[segs[i]].as<JsonObject>();
+      node = child.isNull() ? node[segs[i]].to<JsonObject>() : child;
+    }
+    node[segs.back()] = pathValue.second;
+    wrote = true;
+  }
+  if (!wrote) return false;
   String out;
   serializeJson(doc, out);
   if (doc.overflowed() || out.length() > MAX_TOKEN_FILE_SIZE || out.length() != measureJson(doc)) {
@@ -299,12 +314,21 @@ int requestStream(freeink::SecureHttpClient* session, const std::string& url, co
 }
 
 int requestToFile(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
-                  const std::string& body, const Headers& headers, const char* destPath, const size_t maxResponse) {
+                  const std::string& body, const Headers& headers, const char* destPath, const size_t maxResponse,
+                  const int followRedirects) {
   WifiPowerSaveGuard psGuard;
   freeink::SecureHttpClient tmp;
   freeink::SecureHttpClient* httpPtr = openClient(session, tmp, url, headers);
   if (!httpPtr) return -1;
   freeink::SecureHttpClient& http = *httpPtr;
+  // The client drains intermediate 3xx bodies and clears headers/credentials
+  // when a hop changes origin (e.g. an API answering with a pre-signed CDN URL).
+  // Reset afterwards: a reused session must not inherit the setting.
+  http.setFollowRedirects(followRedirects);
+  struct ResetRedirects {
+    freeink::SecureHttpClient& h;
+    ~ResetRedirects() { h.setFollowRedirects(0); }
+  } resetRedirects{http};
 
   int status = -1;
   bool writeOk = true;

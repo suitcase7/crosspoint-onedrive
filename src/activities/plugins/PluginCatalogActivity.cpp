@@ -40,6 +40,7 @@
 #include "util/PluginHttp.h"
 #include "util/PluginLocations.h"
 #include "util/PluginPickerLayout.h"
+#include "util/PluginSearch.h"
 #include "util/QrUtils.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
@@ -63,6 +64,8 @@ constexpr size_t MAX_API_RESPONSE = 48 * 1024;
 // response until leaving the catalog so downloads can release the parsed rows.
 constexpr char BROWSE_TMP_PATH[] = "/.pcat_tmp.json";
 constexpr size_t MAX_BROWSE_RESPONSE = 1024 * 1024;
+// browse.follow_redirects: hops followed (API -> pre-signed CDN needs one).
+constexpr int MAX_BROWSE_REDIRECTS = 5;
 constexpr size_t MAX_BROWSE_LIST_INDEX_RESPONSE = 16 * 1024;
 // Bounds the list vector: a 16 KB index of tiny entries would otherwise reserve
 // hundreds of KB (and abort, with exceptions off).
@@ -292,11 +295,13 @@ bool PluginCatalogActivity::loadManifest() {
   const std::string pluginDir = manifestPath.substr(0, manifestPath.rfind('/'));
   manifest.tokenFile = pluginhttp::inPluginDir(pluginDir, doc["token"]["file"] | "");
   manifest.tokenPath = doc["token"]["path"] | "token";
+  manifest.tokenRefreshPath = doc["token"]["refresh_path"] | "";
   manifest.configFile = pluginhttp::inPluginDir(pluginDir, doc["config"]["file"] | "");
 
   JsonVariantConst browse = doc["browse"];
   manifest.browseFormat = browse["format"] | "json";
   pluginhttp::readRequest(browse, "GET", manifest.browseReq);
+  manifest.browseFollowRedirects = browse["follow_redirects"] | false;
   manifest.itemsPath = browse["items"] | "";
   manifest.titlePath = browse["fields"]["title"] | (manifest.isXmlList() ? "" : "title");
   manifest.authorPath = browse["fields"]["author"] | "";
@@ -354,6 +359,7 @@ bool PluginCatalogActivity::loadManifest() {
   manifest.fixedListCount = manifest.browseLists.size();
   manifest.searchUrl = browse["search"]["url"] | "";
   manifest.searchBody = browse["search"]["body"] | "";
+  manifest.searchLocal = browse["search"]["local"] | false;
   manifest.xmlItem = browse["item"] | "";
   manifest.xmlContainer = browse["container_element"] | "";
   manifest.xmlSkipSelf = browse["skip_self"] | false;
@@ -394,6 +400,8 @@ bool PluginCatalogActivity::loadManifest() {
   manifest.authExpiresPath = auth["expires_path"] | "expires_in";
   manifest.authTokenPath = auth["token_path"] | "access_token";
   manifest.authErrorPath = auth["error_path"] | "error";
+  pluginhttp::readRequest(auth["refresh"], "POST", manifest.refreshReq);
+  manifest.authRefreshTokenPath = auth["refresh_token_path"] | "refresh_token";
 
   return !manifest.browseReq.url.empty();
 }
@@ -411,7 +419,7 @@ bool PluginCatalogActivity::loadBrowseListIndex(int& status) {
   };
   status = run();
   // Same policy as browsing: an expired password-grant token is minted again once.
-  if ((status == 401 || status == 403) && manifest.hasPasswordGrant()) {
+  if ((status == 401 || status == 403) && manifest.canRenewToken()) {
     response = String();  // the error body is not needed while a token is minted
     if (refreshCredentialToken()) status = run();
   }
@@ -465,6 +473,49 @@ bool PluginCatalogActivity::loadBrowseListIndex(int& status) {
 
 bool PluginCatalogActivity::saveToken(const std::string& value) {
   return pluginhttp::saveTokenToFile(manifest.tokenFile, manifest.tokenPath, value);
+}
+
+bool PluginCatalogActivity::saveTokens(const std::string& access, const std::string& refresh) {
+  if (manifest.tokenRefreshPath.empty() || refresh.empty()) return saveToken(access);
+  return pluginhttp::saveTokensToFile(manifest.tokenFile,
+                                      {{manifest.tokenPath, access}, {manifest.tokenRefreshPath, refresh}});
+}
+
+bool PluginCatalogActivity::refreshWithRefreshToken() {
+  std::string refresh;
+  if (!pluginhttp::loadTokenFromFile(manifest.tokenFile, manifest.tokenRefreshPath, refresh) || refresh.empty()) {
+    LOG_ERR("PCAT", "No refresh token stored");
+    return false;
+  }
+  auto req = substitutedRequest(manifest.refreshReq);
+  // Refresh tokens are URL-safe in practice, but encode for form bodies anyway.
+  substituteAll(req.url, "{refresh_token}", urlEncodeQuery(refresh));
+  substituteAll(req.body, "{refresh_token}", urlEncodeQuery(refresh));
+  String response;
+  const int status = apiRequest(req, response);
+  if (status < 200 || status >= 300) {
+    LOG_ERR("PCAT", "Token refresh failed: status=%d", status);
+    return false;
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, response) != DeserializationError::Ok) {
+    LOG_ERR("PCAT", "Token refresh answer is not JSON");
+    return false;
+  }
+  const JsonVariantConst root = doc.as<JsonVariantConst>();
+  const std::string access = variantToString(resolvePath(root, manifest.authTokenPath));
+  if (access.empty()) {
+    LOG_ERR("PCAT", "Token refresh answer has no access token");
+    return false;
+  }
+  // Providers may rotate the refresh token; keep the old one if none is returned.
+  std::string rotated = variantToString(resolvePath(root, manifest.authRefreshTokenPath));
+  if (!saveTokens(access, rotated.empty() ? refresh : rotated)) {
+    LOG_ERR("PCAT", "Failed to save refreshed token");
+    return false;
+  }
+  token = access;
+  return true;
 }
 
 bool PluginCatalogActivity::loadToken() {
@@ -744,7 +795,7 @@ void PluginCatalogActivity::startBrowse() {
     // Dynamic list indexes and list pickers may both use {token}/{cfg.KEY}, so
     // resolve credentials before either path. Token-less catalogs skip the gate.
     loadConfig();
-    if (!loadToken() && !(manifest.hasPasswordGrant() && refreshCredentialToken())) {
+    if (!loadToken() && !(manifest.canRenewToken() && refreshCredentialToken())) {
       if (manifest.hasDeviceCode()) {
         beginAuth();  // straight to the QR/code sign-in, no interstitial
       } else {
@@ -805,6 +856,7 @@ void PluginCatalogActivity::performSearch(const std::string& query) {
 
 bool PluginCatalogActivity::refreshCredentialToken() {
   loadConfig();
+  if (!manifest.hasPasswordGrant()) return manifest.hasRefreshGrant() && refreshWithRefreshToken();
   std::string minted;
   if (!pluginhttp::mintPasswordToken(session.get(), substituted(manifest.authReq.url, nullptr), manifest.authReq.method,
                                      substituted(manifest.authReq.body, nullptr),
@@ -819,7 +871,7 @@ bool PluginCatalogActivity::refreshCredentialToken() {
 
 bool PluginCatalogActivity::fetchBrowseResponse() {
   loadConfig();
-  if (!loadToken() && !(manifest.hasPasswordGrant() && refreshCredentialToken())) {
+  if (!loadToken() && !(manifest.canRenewToken() && refreshCredentialToken())) {
     state = State::NO_TOKEN;
     requestUpdate();
     return false;
@@ -837,11 +889,11 @@ bool PluginCatalogActivity::fetchBrowseResponse() {
         substituted(manifest.isXmlList() ? manifest.browseReq.body : activeBrowseBody(), nullptr),
         substitutedHeaders(manifest.browseReq.headers, nullptr)};
     return pluginhttp::requestToFile(session.get(), req.url, req.method, req.body, req.headers, BROWSE_TMP_PATH,
-                                     MAX_BROWSE_RESPONSE);
+                                     MAX_BROWSE_RESPONSE, manifest.browseFollowRedirects ? MAX_BROWSE_REDIRECTS : 0);
   };
   int status = run();
   // Rebuild templates with the refreshed token; retry only once.
-  if ((status == 401 || status == 403) && manifest.hasPasswordGrant() && refreshCredentialToken()) status = run();
+  if ((status == 401 || status == 403) && manifest.canRenewToken() && refreshCredentialToken()) status = run();
   if (status >= 200 && status < 300) return true;  // includes WebDAV's 207 Multi-Status
   Storage.remove(BROWSE_TMP_PATH);
   if (status == 401 || status == 403) {
@@ -1049,6 +1101,11 @@ bool PluginCatalogActivity::parseUpdateFirstBrowseResponse(const size_t pageOffs
   return true;
 }
 
+bool PluginCatalogActivity::localSearchMatch(const JsonListParser::Row& row) const {
+  if (!searchActive || !manifest.searchLocal) return true;
+  return pluginsearch::matches(searchQuery, row.field[JsonListParser::F_TITLE], row.field[JsonListParser::F_AUTHOR]);
+}
+
 bool PluginCatalogActivity::parseBrowseResponse() {
   if (manifest.isXmlList()) return parseXmlList();
   if (manifest.tracksInstalls() && browsePaging() == plugincatalogpaging::Paging::Static) {
@@ -1075,7 +1132,7 @@ bool PluginCatalogActivity::parseBrowseResponse() {
     auto selectCompatible = [&](JsonListParser::Row& row) {
       const int thisRow = rowIndex++;
       const bool shown =
-          !row.field[JsonListParser::F_TITLE].empty() &&
+          !row.field[JsonListParser::F_TITLE].empty() && localSearchMatch(row) &&
           catalogEntryCompatible(row.field[COMPAT_FAMILY], row.field[COMPAT_API_MIN], row.field[COMPAT_REQUIRES]);
       if (compatibleWindow.take(plugincatalogpaging::countsTowardPage(paging, shown)) && shown) {
         compatibleRows.push_back(thisRow);
@@ -1084,6 +1141,7 @@ bool PluginCatalogActivity::parseBrowseResponse() {
     const std::string* compatibilityFields[JsonListParser::F_COUNT] = {};
     for (auto& field : compatibilityFields) field = &unused;
     compatibilityFields[JsonListParser::F_TITLE] = &manifest.titlePath;
+    compatibilityFields[JsonListParser::F_AUTHOR] = &manifest.authorPath;  // local search matches it
     compatibilityFields[COMPAT_FAMILY] = &manifest.compatFamilyPath;
     compatibilityFields[COMPAT_API_MIN] = &manifest.compatApiMinPath;
     compatibilityFields[COMPAT_REQUIRES] = &manifest.compatRequiresPath;
@@ -1109,11 +1167,11 @@ bool PluginCatalogActivity::parseBrowseResponse() {
     if (manifest.filtersCompatibility()) {
       if (compatibleIndex >= compatibleRows.size() || compatibleRows[compatibleIndex] != thisRow) return;
       compatibleIndex++;
-    } else if (!visibleWindow.take(
-                   plugincatalogpaging::countsTowardPage(paging, !row.field[JsonListParser::F_TITLE].empty()))) {
+    } else if (!visibleWindow.take(plugincatalogpaging::countsTowardPage(
+                   paging, !row.field[JsonListParser::F_TITLE].empty() && localSearchMatch(row)))) {
       return;
     }
-    if (row.field[JsonListParser::F_TITLE].empty()) return;
+    if (row.field[JsonListParser::F_TITLE].empty() || !localSearchMatch(row)) return;
     Item item;
     item.title = std::move(row.field[JsonListParser::F_TITLE]);
     item.author = std::move(row.field[JsonListParser::F_AUTHOR]);
@@ -1219,7 +1277,7 @@ void PluginCatalogActivity::pollAuth() {
     const JsonVariantConst root = doc.as<JsonVariantConst>();
     const std::string newToken = variantToString(resolvePath(root, manifest.authTokenPath));
     if (!newToken.empty()) {
-      if (!saveToken(newToken)) {
+      if (!saveTokens(newToken, variantToString(resolvePath(root, manifest.authRefreshTokenPath)))) {
         fail(StrId::STR_PLUGIN_AUTH_FAILED);
         return;
       }
@@ -1371,7 +1429,7 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
     String response;
     int status = apiRequest(substitutedRequest(manifest.downloadReq, &item), response);
     // An expired password-grant token: mint a fresh one and retry once.
-    if ((status == 401 || status == 403) && manifest.hasPasswordGrant() && refreshCredentialToken()) {
+    if ((status == 401 || status == 403) && manifest.canRenewToken() && refreshCredentialToken()) {
       status = apiRequest(substitutedRequest(manifest.downloadReq, &item), response);
     }
     if (status < 200 || status >= 300) {
@@ -1427,7 +1485,7 @@ HttpDownloader::DownloadError PluginCatalogActivity::downloadBook(const Item& it
   auto result = fetchFile();
   // A GET with the catalog's token templates gets one mint-and-retry when an
   // expired password-grant token is refused.
-  if (result == HttpDownloader::UNAUTHORIZED && sendDownloadHeaders && manifest.hasPasswordGrant() &&
+  if (result == HttpDownloader::UNAUTHORIZED && sendDownloadHeaders && manifest.canRenewToken() &&
       refreshCredentialToken()) {
     result = fetchFile();
   }

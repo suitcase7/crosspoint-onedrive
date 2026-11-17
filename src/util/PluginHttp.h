@@ -73,6 +73,10 @@ bool loadTokenFromFile(const std::string& file, const std::string& path, std::st
 // previous file on a short write or failed close.
 bool saveTokenToFile(const std::string& file, const std::string& path, const std::string& value);
 
+// Writes several (path, value) pairs into one token file, e.g. an OAuth access
+// token and its refresh token. Pairs with an empty path are skipped.
+bool saveTokensToFile(const std::string& file, const std::vector<std::pair<std::string, std::string>>& values);
+
 // Loads a flat JSON config file into {cfg.KEY} pairs. Missing file = empty.
 void loadConfigFile(const std::string& file, Headers& out);
 
@@ -100,9 +104,12 @@ int requestStream(freeink::SecureHttpClient* session, const std::string& url, co
                   const std::string& body, const Headers& headers, const StreamStart& onStart, const StreamData& onData,
                   bool& complete, const std::function<bool()>& shouldAbort = nullptr);
 
-// Same request, body streamed to a file on SD instead of DRAM.
+// Same request, body streamed to a file on SD instead of DRAM. With
+// followRedirects > 0, up to that many 3xx hops are followed by the client;
+// headers and credentials are dropped when a hop leaves the starting origin.
 int requestToFile(freeink::SecureHttpClient* session, const std::string& url, const std::string& method,
-                  const std::string& body, const Headers& headers, const char* destPath, size_t maxResponse);
+                  const std::string& body, const Headers& headers, const char* destPath, size_t maxResponse,
+                  int followRedirects = 0);
 
 // Password-grant token mint: runs the (already-substituted) auth request and
 // extracts the token at `tokenPath` from a 2xx JSON response.

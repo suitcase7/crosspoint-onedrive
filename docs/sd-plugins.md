@@ -197,6 +197,9 @@ Stock CrossPoint currently advertises these catalog capabilities:
 | `catalog.encoded_item_fields` | Download, sidecar, and details templates can use the percent-encoded item variables `{id_enc}`, `{title_enc}`, `{author_enc}`, and `{url_enc}`. | A catalog whose URLs carry item text can require this so older firmware, which would send the variable names literally, does not offer the entry. |
 | `catalog.list_index_mapping` | `browse.lists_url` can be fetched with `lists_headers` and read with `lists_items`/`lists_fields`, and lists can carry an `id` that fills `{list_id}` and `{list_id_enc}`. | A catalog can build its lists from a service's own folder or tag API, with the token in a header, without a separate server to reshape the answer. |
 | `catalog.list_requirements` | Static and fetched browse lists can declare an optional `requires` array of firmware capabilities; fetched lists can map its path via `lists_fields.requires`. | List discovery hides sections that require unsupported firmware behavior, without tying the index format to any specific plugin or firmware. |
+| `catalog.follow_redirects` | `browse.follow_redirects: true` follows 3xx answers to browse requests (up to 5 hops). Headers and credentials are dropped when a hop leaves the starting origin. | APIs that serve file content through a pre-signed CDN redirect (Microsoft Graph `/content`) can publish static JSON lists without a proxy. |
+| `catalog.local_search` | `browse.search.local: true` fetches the search url (or the browse url) and keeps rows whose title or author contains every query word (ASCII case-insensitive). | A catalog published as one static list gets search without a search API. |
+| `auth.refresh_token` | `token.refresh_path` + `auth.refresh` store the OAuth refresh token next to the access token and exchange it on 401/403, then retry once. | A `device_code` sign-in outlives its short-lived access token (often one hour). |
 | `catalog.server_paths` | A JSON catalog accepts server paths (`/path`) where a response supplies a URL: the `download.url_path` answer, a fetched list `url`, and an item `details_url`. Each path is joined to the origin (scheme, host, and port) of the request that returned it. A `url_path` answer that is a server path is fetched with the download headers. | A catalog whose API answers with paths on its own server, rather than full URLs, works without a proxy that rewrites them. |
 
 Capability names describe firmware behavior available to the entire plugin system.
@@ -259,8 +262,9 @@ JSON catalogs may also map `description`, `detail_author`, and `repository` for 
   // Relative paths are in the plugin's own folder; absolute paths work too.
   // The credential stores (wifi/opds/koreader .json) are refused.
   "token": {                                // omit for token-less catalogs
-    "file": "token.json",                   // written by auth (either side)
-    "path": "token"                         // dotted JSON path inside the file
+    "file": "token.json",                   // written by auth (either side); max 8KB
+    "path": "token",                        // dotted JSON path inside the file
+    "refresh_path": "refresh_token"         // optional: where auth.refresh keeps its refresh token
   },
 
   "config": {                               // optional: flat JSON of {cfg.KEY} values,
@@ -273,6 +277,7 @@ JSON catalogs may also map `description`, `detail_author`, and `repository` for 
     "method": "POST",                       // default GET
     "headers": { "Authorization": "Bearer {token}" },
     "body": "{\"page\":{page},\"per_page\":{limit}}",
+    "follow_redirects": false,              // true: follow 3xx (headers dropped off-origin)
 
     // --- json format ---
     "items": "",                            // dotted path to the item array; "" = response root
@@ -362,7 +367,14 @@ JSON catalogs may also map `description`, `detail_author`, and `repository` for 
     "code_path": "user_code", "verify_url_path": "verification_uri",
     "device_code_path": "device_code", "interval_path": "interval",
     "expires_path": "expires_in", "token_path": "access_token",
-    "error_path": "error"
+    "error_path": "error",
+    "refresh_token_path": "refresh_token",  // refresh token field in poll/refresh answers
+
+    // Optional OAuth refresh-token grant (needs token.refresh_path). On a 401/403
+    // the stored refresh token replaces {refresh_token}, the answer's token_path /
+    // refresh_token_path are saved, and the request is retried once:
+    "refresh": { "url": "...", "method": "POST", "headers": { ... },
+                 "body": "grant_type=refresh_token&refresh_token={refresh_token}&client_id=..." }
 
     // password (silent: mints a token from stored config credentials — for
     // OAuth2 password grants and login-returns-token APIs). Only "request" and

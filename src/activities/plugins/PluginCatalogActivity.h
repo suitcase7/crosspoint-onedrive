@@ -11,6 +11,8 @@
 #include "components/OptionPopup.h"
 #include "network/HttpDownloader.h"
 #include "util/PluginHttp.h"
+
+#include <JsonListParser.h>
 #include "util/PluginLocations.h"
 
 class HalFile;
@@ -48,11 +50,16 @@ class PluginCatalogActivity final : public CatalogActivity {
   struct Manifest {
     // Shared on-SD token and flat {cfg.KEY} configuration.
     std::string tokenFile, tokenPath;
+    // Optional: where the OAuth refresh token lives in the token file.
+    std::string tokenRefreshPath;
     std::string configFile;
     // JSON uses dotted field paths; XML uses element/attribute selectors.
     std::string browseFormat;
     // Browse request: templates may use {token}, {cfg.KEY}, {page}, {offset}, {limit}.
     pluginhttp::RequestSpec browseReq;
+    // Follow 3xx answers to browse requests (headers dropped off-origin), e.g.
+    // a cloud API that serves file content through a pre-signed CDN redirect.
+    bool browseFollowRedirects = false;
     std::string itemsPath;  // JSON: dotted path to the item array; "" = response root
     // JSON field paths (dotted); XML field selectors ("elem", "elem@attr", "@attr").
     std::string titlePath, authorPath, idPath, urlPath;
@@ -90,7 +97,12 @@ class PluginCatalogActivity final : public CatalogActivity {
     size_t fixedListCount = 0;  // leading browseLists entries from the manifest
     // JSON search overrides URL/body independently; empty fields reuse browse.
     std::string searchUrl, searchBody;
-    bool hasSearch() const { return (!searchUrl.empty() || !searchBody.empty()) && browseFormat != "xml"; }
+    // Local search: fetch the search url/body (no {query} needed) and keep
+    // only rows whose title or author contains every query word.
+    bool searchLocal = false;
+    bool hasSearch() const {
+      return (!searchUrl.empty() || !searchBody.empty() || searchLocal) && browseFormat != "xml";
+    }
     // XML list options:
     std::string xmlItem;                     // local-name of the repeating element (required)
     std::string xmlContainer;                // local-name whose presence marks a navigable folder
@@ -116,9 +128,17 @@ class PluginCatalogActivity final : public CatalogActivity {
     pluginhttp::RequestSpec authReq, pollReq;
     std::string authCodePath, authVerifyPath, authDeviceCodePath;
     std::string authIntervalPath, authExpiresPath, authTokenPath, authErrorPath;
+    // OAuth refresh-token grant: on 401/403 the stored refresh token is
+    // exchanged for a new access token ({refresh_token} in the request), so a
+    // device_code sign-in outlives its short-lived access token.
+    pluginhttp::RequestSpec refreshReq;
+    std::string authRefreshTokenPath;  // refresh token field in poll/refresh answers
 
     bool hasDeviceCode() const { return authType == "device_code" && !authReq.url.empty() && !pollReq.url.empty(); }
     bool hasPasswordGrant() const { return authType == "password" && !authReq.url.empty(); }
+    bool hasRefreshGrant() const { return !refreshReq.url.empty() && !tokenRefreshPath.empty(); }
+    // A refused token can be renewed without the user.
+    bool canRenewToken() const { return hasPasswordGrant() || hasRefreshGrant(); }
   };
 
   struct Item {
@@ -188,6 +208,9 @@ class PluginCatalogActivity final : public CatalogActivity {
   bool loadToken();
   void loadConfig();
   bool saveToken(const std::string& value);
+  // Saves the access token, plus the refresh token when the manifest keeps one.
+  bool saveTokens(const std::string& access, const std::string& refresh);
+  bool refreshWithRefreshToken();
   // Show named lists when present, otherwise fetch the first page.
   void startBrowse() override;
   void retryBrowse() override;
@@ -230,6 +253,8 @@ class PluginCatalogActivity final : public CatalogActivity {
   bool parseXmlList();
   bool parseUpdateFirstBrowseResponse(size_t pageOffset);
   bool parseBrowseResponse();
+  // With browse.search.local, a row is kept only if it matches the query.
+  bool localSearchMatch(const JsonListParser::Row& row) const;
   void activateItem(int itemIndex);  // XML list: navigate into a folder, else show details/download
   bool loadItemDetails(int itemIndex, ItemDetails& details);
   void showItemDetails(int itemIndex);

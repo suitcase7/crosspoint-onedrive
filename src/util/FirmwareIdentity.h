@@ -7,5 +7,5 @@ inline constexpr int PLUGIN_API_VERSION = 1;
 inline constexpr const char* PLUGIN_CAPABILITIES =
     "catalog.lists,catalog.notices,catalog.bundle_install,catalog.version_tracking,catalog.compatibility,"
     "catalog.item_details,catalog.encoded_item_fields,catalog.list_index_mapping,catalog.list_requirements,"
-    "catalog.server_paths";
+    "catalog.server_paths,catalog.follow_redirects,catalog.local_search,auth.refresh_token";
 }  // namespace firmwareidentity
